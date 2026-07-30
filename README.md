@@ -47,20 +47,20 @@ Repository:
 
 ## Citation
 If you use this workflow, please cite:
-**VSEARCH**
+- **VSEARCH**
 Rognes, T., Flouri, T., Nichols, B., Quince, C., &amp; Mahé, F. (2016). VSEARCH: A versatile open source tool for metagenomics. PeerJ, 4, e2584. https://doi.org/10.7717/peerj.2584
-**SINTAX**
+- **SINTAX**
 Edgar, R. C. (2016). SINTAX: A simple non-Bayesian taxonomy classifier for 16S and ITS sequences (p. 074161). bioRxiv. https://doi.org/10.1101/074161
-**LCA**
+- **LCA**
 Hanson, N. W., Konwar, K. M., &amp; Hallam, S. J. (2016). LCA*: An entropy-based measure for taxonomic assignment within assembled metagenomes. Bioinformatics,
 32(23), 3535–3542. https://doi.org/10.1093/bioinformatics/btw400
-**BLAST**
+- **BLAST**
 Altschul, S. F., Gish, W., Miller, W., Myers, E. W., &amp; Lipman, D. J. (1990). Basic local alignment search tool. Journal of Molecular Biology, 215(3), 403–410. https://doi.org/10.1016/S0022-2836(05)80360-2
-**UNITE database**
+- **UNITE database**
 Abarenkov, K., Nilsson, R. H., Larsson, K.-H., Taylor, A. F. S., May, T. W., Frøslev, T. G., Pawlowska, J., Lindahl, B., Põldmaa, K., Truong, C., Vu, D., Hosoya, T., Niskanen, T., Piirmann, T., Ivanov, F., Zirk, A., Peterson, M., Cheeke, T. E., Ishigami, Y., … Kõljalg, U. (2024). The UNITE database for molecular identification and taxonomic communication of fungi and other eukaryotes: Sequences, taxa and classifications reconsidered. Nucleic Acids Research, 52(D1), D791–D797. https://doi.org/10.1093/nar/gkad1039
-**NCBI Bioproject PRJNA970541**
+- **NCBI Bioproject PRJNA970541**
 Schön ME, Zuern S, Vera M, Garnica S (2023) High diversity of fungal ecological groups in Andean–Patagonian Nothofagus forests. PLoS ONE 18(8): e0290398. https://doi.org/10.1371/journal.pone.0290398
-**GSMc dataset**
+- **GSMc dataset**
 Tedersoo, L., Mikryukov, V., Anslan, S., Bahram, M., Khalid, A. N., Corrales, A., Agan, A., Vasco-Palacios, A.-M., Saitta, A., Antonelli, A., Rinaldi, A. C.,
 Verbeken, A., Sulistyo, B. P., Tamgnoue, B., Furneaux, B., Ritter, C. D., Nyamukondiwa, C., Sharp, C., Marín, C., … Abarenkov, K. (2021). The Global Soil Mycobiome consortium dataset for boosting fungal diversity research. Fungal Diversity, 111(1), 573–588. https://doi.org/10.1007/s13225-021-00493-7
 
