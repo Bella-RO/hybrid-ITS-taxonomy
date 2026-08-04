@@ -437,6 +437,7 @@ assignment stops at the first rank where the reference hits no longer agree. For
 correspond to different genera, the OTU is assigned only up to the shared family. This LCA table is later integrated with the SINTAX and BLAST assignment 
 results to generate the final taxonomic table used in the downstream analyses.
 
+#TERMINAL
 #Taxonomic assignment using BLAST
 #Reference database Bioproject PRJNA970541 
 
@@ -450,6 +451,1061 @@ makeblastdb \
 #Create the output directory
 mkdir -p /mnt/d/HongosAN/EC2/Nanopore/BLAST
 
+#Run the BLAST search
+blastn \
+    -query /mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/otus97.centroids.fa \
+    -db /mnt/d/HongosAN/EC2/Nanopore/refs/Fungiref \
+    -task blastn \
+    -evalue 1e-20 \
+    -max_target_seqs 50 \
+    -outfmt '6 qseqid sacc pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames staxids' \
+    -out /mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/Asignacion/otus97.blast.b6
+
+#RStudio
+#Generate the BLAST taxonomic assignment table
+#The BLAST results are processed in R to generate a taxonomic assignment table for the OTUs. This procedure includes the following steps:
+#1.Read and prepare the BLAST results.
+#2. Filter alignments by sequence identity and alignment length.
+#3. Select a preliminary reference assignment for each OTU.
+#4. Map reference accessions to scientific names.
+#5. Retrieve the complete taxonomic lineage from NCBI.
+#6. Export the final BLAST taxonomic assignment table.
+
+#INSTALL AND LOAD REQUIRED PACKAGES
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("Biostrings", quietly = TRUE)) {
+  BiocManager::install("Biostrings")
+}
+
+required_packages <- c(
+  "tidyverse",
+  "taxize"
+)
+
+packages_to_install <- required_packages[
+  !vapply(
+    required_packages,
+    requireNamespace,
+    logical(1),
+    quietly = TRUE
+  )
+]
+
+if (length(packages_to_install) > 0) {
+  install.packages(
+    packages_to_install,
+    repos = "https://cloud.r-project.org"
+  )
+}
+
+library(tidyverse)
+library(Biostrings)
+library(taxize)
+
+
+#READ AND PREPARE THE BLAST RESULTS
+
+setwd("D:/USUARIO/Desktop/HongosAN/Nano_assig/Results/0.90_pool")
+
+getwd()
+list.files()
+
+# Read the tabular BLAST output
+blast <- read.delim(
+  "otus_BLAST_080.b6",
+  header = FALSE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+# Assign column names according to the BLAST output format
+colnames(blast) <- c(
+  "OTU",
+  "Ref",
+  "PID",
+  "AlnLen",
+  "Mism",
+  "Gap",
+  "qStart",
+  "qEnd",
+  "sStart",
+  "sEnd",
+  "E",
+  "Bits",
+  "SciName",
+  "TaxID"
+)
+
+# Remove abundance information from OTU identifiers
+blast <- blast %>%
+  mutate(
+    OTU = sub(";size=.*", "", OTU)
+  )
+
+
+#Filter the BLAST alignments
+
+blast_filt <- blast %>%
+  filter(
+    PID >= 80,
+    AlnLen >= 150
+  )
+
+#Select a preliminary reference assignment
+
+blast_assignment <- blast_filt %>%
+  count(
+    OTU,
+    Ref,
+    name = "Hit_frequency"
+  ) %>%
+  group_by(OTU) %>%
+  arrange(
+    desc(Hit_frequency),
+    Ref,
+    .by_group = TRUE
+  ) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  rename(
+    Selected_ref = Ref
+  )
+
+#CREATE THE BLAST REFERENCE TAXONOMY MAP
+fasta <- readDNAStringSet(
+  "D:/USUARIO/Downloads/Fungiref.fasta"
+)
+
+#Extract the FASTA headers
+headers <- names(fasta)
+
+#Build the accession–scientific name table
+taxmapB <- tibble(Header = headers) %>%
+  mutate(
+    Ref = sub(" .*", "", Header),
+    SciName = sub("^[^ ]+ ", "", Header),
+    SciName = sub(" ITS.*", "", SciName),
+    Ref = sub("\\.\\d+$", "", Ref)
+  ) %>%
+  select(
+    Ref,
+    SciName
+  ) %>%
+  distinct()
+
+#Map the selected references to scientific names
+blast_assignment <- blast_assignment %>%
+  mutate(
+    Selected_ref = sub("\\.\\d+$", "", Selected_ref)
+  ) %>%
+  left_join(
+    taxmapB,
+    by = c("Selected_ref" = "Ref")
+  ) %>%
+  transmute(
+    OTU,
+    BLAST_reference = Selected_ref,
+    BLAST_taxon = SciName,
+    Hit_frequency
+  )
+
+#Save the preliminary BLAST assignments
+write.table(
+  blast_assignment,
+  "otus090_blast_preliminary.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+#Retrieve the complete NCBI taxonomic lineage
+Sys.setenv(
+  ENTREZ_KEY = Sys.getenv("NCBI_ENTREZ_KEY")
+)
+
+
+#The API key can be stored in the `.Renviron` file:
+```text
+NCBI_ENTREZ_KEY=YOUR_PRIVATE_NCBI_API_KEY
+```
+#The `.Renviron` file and any file containing credentials must be excluded from GitHub using `.gitignore`.
+
+#Standardize the scientific names
+#The function below removes strain and isolate information and retains a canonical binomial name when available.
+
+canonical_species <- function(x) {
+
+  x <- str_replace_all(
+    x,
+    regex(
+      "\\b(CBS|ATCC|DSM|NRRL|JCM|IFO|strain|isolate)\\b.*",
+      ignore_case = TRUE
+    ),
+    ""
+  )
+
+  x <- str_squish(x)
+
+  matched_name <- str_match(
+    x,
+    "^([A-Z][A-Za-z_-]+)\\s+([a-z][A-Za-z0-9_-]+)"
+  )
+
+  ifelse(
+    is.na(matched_name[, 1]),
+    NA_character_,
+    matched_name[, 1]
+  )
+}
+
+blast_names <- blast_assignment %>%
+  mutate(
+    name = canonical_species(BLAST_taxon)
+  ) %>%
+  filter(
+    !is.na(name)
+  )
+```
+
+#Retrieve the taxonomic classification from NCBI
+
+lineage_list <- taxize::classification(
+  blast_names$name,
+  db = "ncbi"
+)
+
+
+The resulting list is transformed into a wide taxonomic table containing the principal taxonomic ranks.
+
+
+lineage_table <- imap_dfr(
+  lineage_list,
+  function(lineage, query_name) {
+
+    if (
+      is.null(lineage) ||
+      inherits(lineage, "try-error") ||
+      is.logical(lineage)
+    ) {
+      return(
+        tibble(query = query_name)
+      )
+    }
+
+    lineage %>%
+      mutate(
+        name_rank = tolower(rank)
+      ) %>%
+      filter(
+        name_rank %in% c(
+          "kingdom",
+          "phylum",
+          "class",
+          "order",
+          "family",
+          "genus",
+          "species"
+        )
+      ) %>%
+      select(
+        name_rank,
+        taxon_name = name
+      ) %>%
+      distinct(
+        name_rank,
+        .keep_all = TRUE
+      ) %>%
+      pivot_wider(
+        names_from = name_rank,
+        values_from = taxon_name
+      ) %>%
+      mutate(
+        query = query_name
+      )
+  }
+)
+
+
+#Generate the final BLAST taxonomic table
+
+tax_from_blast <- blast_names %>%
+  left_join(
+    lineage_table,
+    by = c("name" = "query")
+  ) %>%
+  transmute(
+    OTU,
+    k = kingdom,
+    p = phylum,
+    c = class,
+    o = order,
+    f = family,
+    g = genus,
+    s = species
+  ) %>%
+  mutate(
+    across(
+      c(k, p, c, o, f, g, s),
+      ~replace_na(.x, "")
+    ),
+    taxonomy = paste0(
+      "k:", k,
+      ",p:", p,
+      ",c:", c,
+      ",o:", o,
+      ",f:", f,
+      ",g:", g,
+      ",s:", s
+    )
+  )
+
+
+#Export the final table
+
+write_tsv(
+  tax_from_blast,
+  "otus090_blast.tsv"
+)
+
+#The resulting file, `otus090_blast.tsv`, contains the taxonomic lineage assigned to each OTU from kingdom to species. 
+This table is subsequently integrated with the SINTAX and LCA results to generate the final consensus taxonomic assignment.
+
+#Merge taxonomic assignments
+#The taxonomic assignments generated using SINTAX, LCA, and BLAST are integrated in R to produce a final taxonomy table for the OTUs.
+#The following files are required: otus97.sintax.tsv, otus97_LCA.tsv, otus97.blast.tsv
+
+#Run the analysis in RStudio
+
+library(tidyverse)
+
+setwd(
+  "D:/USUARIO/Desktop/HongosAN/Temuco/4_Resultados/4_Asignacion/Tabla_final"
+)
+
+getwd()
+list.files()
+
+#Read the SINTAX assignments
+
+# Read SINTAX results
+sintax <- read.delim(
+  "otus97.sintax.tsv",
+  header = FALSE,
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+colnames(sintax) <- c(
+  "OTU",
+  "SINTAX",
+  "Pass",
+  "SINTAX_Tax"
+)
+
+#Remove abundance information from OTU identifiers
+sintax <- sintax %>%
+  mutate(
+    OTU = sub(";size=.*", "", OTU),
+
+    # Remove confidence scores from the taxonomic string
+    SINTAX = gsub("\\([0-9.]+\\)", "", SINTAX)
+  )
+
+#Read the LCA assignments
+
+```r
+# Read LCA results
+lca <- read.delim(
+  "otus97_LCA.tsv",
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+colnames(lca) <- c(
+  "OTU",
+  "LCA"
+)
+
+lca <- lca %>%
+  mutate(
+    OTU = sub(";size=.*", "", OTU)
+  )
+
+#Read the BLAST assignments
+
+# Read BLAST results
+blast <- read.delim(
+  "otus97.blast.tsv",
+  sep = "\t",
+  stringsAsFactors = FALSE
+)
+
+colnames(blast) <- c(
+  "OTU",
+  "k",
+  "p",
+  "c",
+  "o",
+  "f",
+  "g",
+  "s",
+  "BLAST"
+)
+
+blast <- blast %>%
+  mutate(
+    OTU = sub(";size=.*", "", OTU)
+  ) %>%
+  select(
+    OTU,
+    BLAST
+  )
+
+#Merge the assignment tables
+
+tax_all <- sintax %>%
+  select(
+    OTU,
+    SINTAX,
+    Pass
+  ) %>%
+  full_join(
+    lca,
+    by = "OTU"
+  ) %>%
+  full_join(
+    blast,
+    by = "OTU"
+  )
+
+#Define the assignment selection rule
+
+choose_taxonomy <- function(sintax_tax, pass, lca_tax, blast_tax) {
+
+  if (
+    !is.na(sintax_tax) &&
+    sintax_tax != "" &&
+    !is.na(pass) &&
+    pass == "+"
+  ) {
+    return(sintax_tax)
+  }
+
+  if (
+    !is.na(lca_tax) &&
+    lca_tax != ""
+  ) {
+    return(lca_tax)
+  }
+
+  if (
+    !is.na(blast_tax) &&
+    blast_tax != ""
+  ) {
+    return(blast_tax)
+  }
+
+  return(NA_character_)
+}
+
+
+tax_all <- tax_all %>%
+  mutate(
+    FinalTax = mapply(
+      choose_taxonomy,
+      SINTAX,
+      Pass,
+      LCA,
+      BLAST,
+      USE.NAMES = FALSE
+    )
+  )
+
+
+#Standardize the taxonomic strings
+
+tax_all <- tax_all %>%
+  mutate(
+    # Remove SINTAX confidence scores
+    FinalTax = gsub(
+      "\\([0-9.]+\\)",
+      "",
+      FinalTax
+    ),
+
+    # Replace semicolons with commas
+    FinalTax = gsub(
+      ";",
+      ",",
+      FinalTax
+    ),
+
+    # Remove extra whitespace
+    FinalTax = gsub(
+      "\\s+",
+      "",
+      FinalTax
+    )
+  )
+
+#Extract each taxonomic rank
+
+extract_rank <- function(taxonomy, rank_prefix) {
+
+  if (
+    is.na(taxonomy) ||
+    taxonomy == ""
+  ) {
+    return(NA_character_)
+  }
+
+  entries <- unlist(
+    strsplit(taxonomy, ",")
+  )
+
+  match <- entries[
+    startsWith(entries, rank_prefix)
+  ]
+
+  if (length(match) == 0) {
+    return(NA_character_)
+  }
+
+  sub(
+    paste0("^", rank_prefix),
+    "",
+    match[1]
+  )
+}
+
+#Create the final taxonomy columns:
+
+tax_final <- tax_all %>%
+  mutate(
+    Kingdom = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "k:"
+    ),
+    Phylum = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "p:"
+    ),
+    Class = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "c:"
+    ),
+    Order = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "o:"
+    ),
+    Family = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "f:"
+    ),
+    Genus = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "g:"
+    ),
+    Species = vapply(
+      FinalTax,
+      extract_rank,
+      character(1),
+      rank_prefix = "s:"
+    )
+  ) %>%
+  select(
+    OTU,
+    Kingdom,
+    Phylum,
+    Class,
+    Order,
+    Family,
+    Genus,
+    Species
+  )
+
+#Export the final taxonomy table
+
+write.table(
+  tax_final,
+  "otus97_taxonomy_final.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+#The resulting file, `otus97_taxonomy_final.tsv`, contains one row per OTU and separate columns for kingdom, 
+phylum, class, order, family, genus, and species. This table can subsequently be incorporated into the final `phyloseq` object.
+
+#Create the phyloseq object
+#Required files: otus97_taxonomy_final.tsv, otu_table.tsv, metadata.tsv
+
+library(phyloseq)
+library(Biostrings)
+library(DECIPHER)
+library(phangorn)
+
+#Read OTU abundance table
+otu <- read.table(
+  "otutab.tsv",
+  header = TRUE,
+  row.names = 1,
+  sep = "\t",
+  comment.char = "",
+  check.names = FALSE
+)
+
+otu_mat <- as.matrix(otu)
+storage.mode(otu_mat) <- "numeric"
+
+#Read taxonomy table
+tax <- read.table(
+  "otus97_taxonomy_final.tsv",
+  header = TRUE,
+  row.names = 1,
+  sep = "\t",
+  comment.char = "",
+  check.names = FALSE
+)
+
+tax_mat <- as.matrix(tax)
+
+#Retain OTUs shared between abundance and taxonomy tables
+common_taxa <- intersect(
+  rownames(otu_mat),
+  rownames(tax_mat)
+)
+
+otu_mat <- otu_mat[
+  common_taxa,
+  ,
+  drop = FALSE
+]
+
+tax_mat <- tax_mat[
+  common_taxa,
+  ,
+  drop = FALSE
+]
+
+#Read sample metadata
+meta <- read.csv(
+  "Metadata_AN.csv",
+  header = TRUE,
+  row.names = 1,
+  sep = ";",
+  dec = ",",
+  check.names = FALSE,
+  fileEncoding = "latin1"
+)
+
+#Remove completely empty metadata columns
+meta <- meta[
+  ,
+  colSums(is.na(meta) | meta == "") < nrow(meta),
+  drop = FALSE
+]
+
+#Retain samples shared between the OTU table and metadata
+common_samples <- intersect(
+  colnames(otu_mat),
+  rownames(meta)
+)
+
+otu_mat <- otu_mat[
+  ,
+  common_samples,
+  drop = FALSE
+]
+
+meta <- meta[
+  common_samples,
+  ,
+  drop = FALSE
+]
+
+#Create phyloseq components
+OTU <- otu_table(
+  otu_mat,
+  taxa_are_rows = TRUE
+)
+
+TAX <- tax_table(
+  tax_mat
+)
+
+SAM <- sample_data(
+  meta
+)
+
+#Create the base phyloseq object
+ps <- phyloseq(
+  OTU,
+  TAX,
+  SAM
+)
+
+#Read and add representative OTU sequences
+seqs <- readDNAStringSet(
+  "otus97.centroids.fa"
+)
+
+#Remove abundance information from sequence identifiers
+names(seqs) <- sub(
+  ";size=.*",
+  "",
+  names(seqs)
+)
+
+#Retain sequences associated with OTUs in the phyloseq object
+seqs <- seqs[
+  names(seqs) %in% taxa_names(ps)
+]
+
+#Arrange sequences in the same order as the OTUs
+seqs <- seqs[
+  taxa_names(ps)[taxa_names(ps) %in% names(seqs)]
+]
+
+#Add representative sequences
+ps <- merge_phyloseq(
+  ps,
+  refseq(seqs)
+)
+
+#Remove OTUs with zero total abundance
+ps <- prune_taxa(
+  taxa_sums(ps) > 0,
+  ps
+)
+
+#Inspect the final phyloseq object
+ps
+ntaxa(ps)
+nsamples(ps)
+sample_names(ps)
+rank_names(ps)
+sample_variables(ps)
+
+#Save the final phyloseq object
+saveRDS(
+  ps,
+  file = "mi_proyecto_phyloseq.rds"
+)
+
+#ADD FUNGUILD RESULTS TO PHYLOSEQ
+#Extract the taxonomy and OTU abundance data from the phyloseq object to generate the input files required by FUNGuild. 
+After running FUNGuild, the functional annotations—primarily Trophic Mode and Guild—are matched to the corresponding OTU 
+identifiers and incorporated as additional columns in the phyloseq taxonomic table.
+
+library(phyloseq)
+library(dplyr)
+library(readr)
+
+#Load the phyloseq object
+ps <- readRDS(
+  "D:/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/Phyloseq/ASIGNACION_AN_bruto.rds"
+)
+
+#Extract metadata, taxonomy, and OTU abundance table
+metadata_df <- data.frame(
+  sample_data(ps)
+)
+
+taxonomy_df <- data.frame(
+  tax_table(ps),
+  check.names = FALSE
+)
+
+abundance_df <- data.frame(
+  otu_table(ps),
+  check.names = FALSE
+)
+
+#Confirm that the required taxonomic columns are present
+required_ranks <- c(
+  "Kingdom",
+  "Phylum",
+  "Class",
+  "Order",
+  "Family",
+  "Genus",
+  "Species"
+)
+
+missing_ranks <- setdiff(
+  required_ranks,
+  colnames(taxonomy_df)
+)
+
+if (length(missing_ranks) > 0) {
+  stop(
+    paste(
+      "The following taxonomic columns are missing:",
+      paste(missing_ranks, collapse = ", ")
+    )
+  )
+}
+
+#Replace missing taxonomic values with empty strings
+taxonomy_df <- taxonomy_df %>%
+  mutate(
+    across(
+      all_of(required_ranks),
+      ~ifelse(is.na(.x) | .x == "", "", .x)
+    )
+  )
+
+#Create the taxonomy string required by FUNGuild
+taxonomy_df <- taxonomy_df %>%
+  mutate(
+    taxonomy = paste0(
+      "k__", Kingdom, ";",
+      "p__", Phylum, ";",
+      "c__", Class, ";",
+      "o__", Order, ";",
+      "f__", Family, ";",
+      "g__", Genus, ";",
+      "s__", Species
+    )
+  )
+
+#Clean incomplete taxonomic ranks
+taxonomy_df$taxonomy <- gsub(
+  ";[a-z]__($|;)",
+  ";",
+  taxonomy_df$taxonomy
+)
+
+taxonomy_df$taxonomy <- gsub(
+  ";;+",
+  ";",
+  taxonomy_df$taxonomy
+)
+
+taxonomy_df$taxonomy <- gsub(
+  ";$",
+  "",
+  taxonomy_df$taxonomy
+)
+
+taxonomy_df$taxonomy <- gsub(
+  "NA",
+  "",
+  taxonomy_df$taxonomy
+)
+
+#Add OTU identifiers as a column
+taxonomy_df$OTU <- rownames(
+  taxonomy_df
+)
+
+abundance_df <- cbind(
+  OTU = rownames(abundance_df),
+  abundance_df
+)
+
+#Export taxonomy and abundance tables
+write_tsv(
+  taxonomy_df,
+  "taxonomy.tsv"
+)
+
+write_tsv(
+  abundance_df,
+  "abundance.tsv"
+)
+
+# PREPARE THE FUNGUILD INPUT FILE
+# Before running FUNGuild:
+# Arrange taxonomy.tsv and abundance.tsv alphabetically
+#    according to the OTU column.
+# Add the taxonomy column from taxonomy.tsv as the last
+#    column of abundance.tsv.
+# Ensure that the final column is named exactly:
+#    taxonomy
+# Save the resulting table as a tab-delimited text file,
+#    for example:
+#    funguild.txt
+# Run FUNGuild in a WSL terminal:
+# git clone https://github.com/UMNFuN/FUNGuild
+# cd FUNGuild
+# In Guilds_v1.1.py, replace:
+# dialect = csv.Sniffer().sniff(f1.read())
+# with:
+# dialect = csv.excel_tab
+# Check the file separators:
+# head -5 funguild.txt | cat -A
+# Remove Windows carriage returns (^M), if present:
+# sed -i 's/\r$//' funguild.txt
+# Run FUNGuild:
+# python3 Guilds_v1.1.py -otu funguild.txt -db fungi
+# The expected output file is:
+# funguild.guilds.txt
+
+#Read the FUNGuild results
+funguild_df <- read.table(
+  "funguild.guilds.txt",
+  header = TRUE,
+  row.names = 1,
+  sep = "\t",
+  comment.char = "",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+#Convert the FUNGuild table to a matrix
+funguild_mat <- as.matrix(
+  funguild_df
+)
+
+#Check the correspondence between OTU identifiers
+head(
+  rownames(tax_table(ps))
+)
+
+head(
+  rownames(funguild_mat)
+)
+
+matched_otus <- sum(
+  rownames(tax_table(ps)) %in%
+    rownames(funguild_mat)
+)
+
+cat(
+  "Matched OTUs:",
+  matched_otus,
+  "of",
+  ntaxa(ps),
+  "\n"
+)
+
+#Extract the phyloseq taxonomy table as a matrix
+tax_ps <- as(
+  tax_table(ps),
+  "matrix"
+)
+
+#Arrange FUNGuild results according to phyloseq OTU order
+funguild_ordered <- funguild_mat[
+  match(
+    rownames(tax_ps),
+    rownames(funguild_mat)
+  ),
+  ,
+  drop = FALSE
+]
+
+#Confirm that both tables have the same OTU order
+stopifnot(
+  identical(
+    rownames(tax_ps),
+    rownames(funguild_ordered)
+  )
+)
+
+#Confirm that the required FUNGuild columns are present
+required_funguild_columns <- c(
+  "Trophic Mode",
+  "Guild"
+)
+
+missing_funguild_columns <- setdiff(
+  required_funguild_columns,
+  colnames(funguild_ordered)
+)
+
+if (length(missing_funguild_columns) > 0) {
+  stop(
+    paste(
+      "The following FUNGuild columns are missing:",
+      paste(missing_funguild_columns, collapse = ", ")
+    )
+  )
+}
+
+#Extract functional assignments
+trophic_mode <- funguild_ordered[
+  ,
+  "Trophic Mode"
+]
+
+guild <- funguild_ordered[
+  ,
+  "Guild"
+]
+
+#Replace empty assignments with NA
+trophic_mode[
+  trophic_mode %in% c("-", "")
+] <- NA
+
+guild[
+  guild %in% c("-", "")
+] <- NA
+
+#Remove external vertical bars
+trophic_mode <- gsub(
+  "^\\|+|\\|+$",
+  "",
+  trophic_mode
+)
+
+guild <- gsub(
+  "^\\|+|\\|+$",
+  "",
+  guild
+)
+
+#Add functional information to the taxonomy table
+tax_ps <- cbind(
+  tax_ps,
+  Trophic_Mode = trophic_mode,
+  Guild = guild
+)
+
+#Replace the taxonomy table in the phyloseq object
+tax_table(ps) <- tax_table(
+  tax_ps
+)
+
+# 21. Inspect the incorporated FUNGuild columns
+colnames(
+  tax_table(ps)
+)
+
+head(
+  tax_table(ps)[
+    ,
+    c(
+      "Trophic_Mode",
+      "Guild"
+    )
+  ]
+)
+
+#Save the final phyloseq object
+saveRDS(
+  ps,
+  file = "ASIGNACION_AN_FUNGUILD.rds"
+)
 
 
 
