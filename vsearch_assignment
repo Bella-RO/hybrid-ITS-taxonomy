@@ -165,6 +165,97 @@ grep "^>" "$OUT/nanopore.chim.derep.fa" | \
 sed -n 's/.*;size=\([0-9]*\).*/\1/p' | \
 awk '{sum+=$1} END{print sum+0}'
 
+#Trimming primers from Nanopore data
+#!/bin/bash
+
+# Define primer sequences
+F_PRIMER="CTTGGTCATTTAGAGGAAGTAA"
+R_PRIMER="GCTGCGTTCTTCATCGATGC"
+
+# Define Cutadapt parameters
+LENGTH="-m 1"
+DISCARD="--discard-untrimmed"
+ERROR_RATE="-e 0.8"
+MIN_OVERLAP="--overlap 5"
+
+# Directory containing the paired-end FASTQ files
+DIRECTORY="/mnt/c/Users/USUARIO/OneDrive/Desktop/HongosAN/Antartica/Illumina/Secuencias/illumina_SRR6"
+
+#cutadapt_illumina.sh
+# Create the output directory
+OUTPUT_DIR="$DIRECTORY/2_trimmed_cutadapt"
+mkdir -p "$OUTPUT_DIR"
+
+# Process each pair of FASTQ files
+for R1_INPUT in "$DIRECTORY"/*_1.fastq.gz; do
+
+  R2_INPUT="${R1_INPUT/_1.fastq.gz/_2.fastq.gz}"
+
+  # Skip the sample if the paired file is missing
+  [[ -f "$R2_INPUT" ]] || {
+    echo "Paired file not found for $(basename "$R1_INPUT")"
+    continue
+  }
+
+  BASENAME=$(basename "$R1_INPUT" _1.fastq.gz)
+
+  R1_OUTPUT="$OUTPUT_DIR/${BASENAME}.1.trimmed.fastq"
+  R2_OUTPUT="$OUTPUT_DIR/${BASENAME}.2.trimmed.fastq"
+
+  # Trim forward and reverse primers from paired-end reads
+  cutadapt \
+    -g $F_PRIMER \
+    -G $R_PRIMER \
+    -o "$R1_OUTPUT" \
+    -p "$R2_OUTPUT" \
+    "$R1_INPUT" \
+    "$R2_INPUT" \
+    $LENGTH \
+    $DISCARD \
+    $ERROR_RATE \
+    $MIN_OVERLAP
+
+done
+
+#trim.sh
+#Quality filtering of Illumina paired-end reads using Trimmomatic
+#!/bin/bash
+# Directorio con los archivos de entrada
+input_dir="/mnt/c/Users/USUARIO/OneDrive/Desktop/HongosAN/Antartica/Illumina/Secuencias/illumina_SRR1/2_trimmed_cutadapt"
+output_dir="/mnt/c/Users/USUARIO/OneDrive/Desktop/HongosAN/Antartica/Illumina/Secuencias/illumina_SRR1/2_trimmed_cutadapt/trimmomatic"
+
+# Crear directorio de salida si no existe
+mkdir -p "$output_dir"
+
+# Loop sobre los archivos en el directorio
+for f1 in "$input_dir"/*.1.trimmed.fastq; do
+  # Encontrar el archivo pareado correspondiente
+  f2="${f1/.1.trimmed.fastq/.2.trimmed.fastq}"
+  [[ -f "$f2" ]] || { echo "No encuentro el par para $(basename "$f1")"; continue; }
+
+  # Crear nombres de archivos de salida
+  base_name="$(basename "$f1" .1.trimmed.fastq)"
+  newf1_paired="${output_dir}/${base_name}_R1_trimmomatic_paired.fastq"
+  newf1_unpaired="${output_dir}/${base_name}_R1_trimmomatic_unpaired.fastq"
+  newf2_paired="${output_dir}/${base_name}_R2_trimmomatic_paired.fastq"
+  newf2_unpaired="${output_dir}/${base_name}_R2_trimmomatic_unpaired.fastq"
+
+  # Ejecutar Trimmomatic (sin comodines, todo son rutas concretas)
+  java -jar "/home/bellaro/Trimmomatic-0.39/trimmomatic-0.39.jar" PE -threads 10 -phred33 \
+    -trimlog "${output_dir}/${base_name}_trimLogFile" \
+    -summary "${output_dir}/${base_name}_statsSummaryFile" \
+    "$f1" "$f2" \
+    "$newf1_paired" "$newf1_unpaired" \
+    "$newf2_paired" "$newf2_unpaired" \
+    LEADING:3 TRAILING:3 MINLEN:100
+done
+
+#After primer trimming and quality filtering, the Illumina reads were processed using the DADA2 pipeline through the chimera removal step, 
+generating the final non-chimeric ASVs. These non-chimeric sequences were then exported and incorporated into the VSEARCH workflow, 
+where they were combined with the non-chimeric Nanopore sequences. The pooled dataset was subsequently clustered at 97% sequence 
+identity to generate a common set of OTU representative sequences (centroids) and a unified OTU abundance table for downstream taxonomic 
+assignment and phyloseq construction. (https://benjjneb.github.io/dada2/ITS_workflow.html)
+
 #com_centroid.sh
 #Combine Nanopore and Illumina data and cluster sequences
 #!/usr/bin/env bash
@@ -209,6 +300,26 @@ vsearch --cluster_fast "$COMBINED_FASTA" \
 
 echo "✓ Centroids: $OUT/otus97.centroids.fa"
 echo "✓ UC file:   $OUT/otus97.assign.uc"
+
+#Generate the OTU abundance table
+#!/usr/bin/env bash
+set -euo pipefail
+
+WORK="/home/ubuntu/HongosAN/hongos"
+OUT="/home/ubuntu/HongosAN/hongos/resultados"
+
+ID="0.97"
+
+# Map all non-chimeric sequences to the representative OTU centroids
+# and generate the OTU abundance table
+vsearch \
+    --usearch_global "$WORK/all.nochim_expanded.fa" \
+    --db "$WORK/otus97.centroids.fa" \
+    --id "$ID" \
+    --strand both \
+    --otutabout "$OUT/otu_table.tsv"
+
+echo "✓ OTU abundance table: $OUT/otu_table.tsv"
 
 #Assign taxonomy using SINTAX
 # Create the output directory
@@ -1486,7 +1597,7 @@ tax_table(ps) <- tax_table(
   tax_ps
 )
 
-# 21. Inspect the incorporated FUNGuild columns
+#Inspect the incorporated FUNGuild columns
 colnames(
   tax_table(ps)
 )
