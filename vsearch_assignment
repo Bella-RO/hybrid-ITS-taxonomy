@@ -1,0 +1,456 @@
+#Trimming primers from Nanopore data
+#Forward primer: CTTGGTCATTTAGAGGAAGTAA
+#Reverse primer: GCTGCGTTCTTCATCGATGC
+
+#Open a terminal.
+#If you are using Windows, open the WSL (Windows Subsystem for Linux) terminal.
+
+#The same workflow applies to all scripts
+
+#Create the script:
+nano cutadapt_nanopore.sh
+
+#!/bin/bash
+set -euo pipefail
+
+FWD="CTTGGTCATTTAGAGGAAGTAA"
+REV="GCTGCGTTCTTCATCGATGC"
+FWD_RC="TTACTTCCTCTAAATGACCAAG"
+REV_RC="GCATCGATGAAGAACGCAGC"
+
+INPUT_DIR="."
+OUTDIR="1_cutadapt"
+mkdir -p "$OUTDIR"
+
+for f in *.fastq.gz; do
+    base=$(basename "$f" .fastq.gz)
+    cutadapt \
+        --cores=0 \
+        -g "$FWD" -g "$FWD_RC" \
+        -a "$REV_RC" -a "$REV" \
+        --overlap 8 \
+        --times 2 \
+        -e 0.20 \
+        --minimum-length 50 \
+        -o "$OUTDIR/${base}.cut.fastq.gz" \
+        "$f"
+done
+
+echo "Cutadapt terminado."
+
+#Save:
+Ctrl + O
+
+#Exit:
+Ctrl + X
+
+#Make the script executable:
+sudo chmod +x cutadapt_nanopore.sh
+
+# Length-based pre-filtering of samples
+
+#seqkit.sh
+#!/bin/bash
+
+# SeqKit script
+# Pre-filter all FASTQ files in the input directory
+# Filter reads by length and quality
+
+INPUT_DIR="~/Nanopore/Nanopore/cutadapt"
+OUTDIR="~/Nanopore/Nanopore/cutadapt/seqkit"
+mkdir -p "$OUTDIR"
+
+MINLEN=200
+MAXLEN=350    # Recommended truncation length for ONT–Illumina integration
+QTHRESH=12
+
+for f in $INPUT_DIR/*.fastq.gz; do
+    base=$(basename "$f" .cut.fastq.gz)
+
+    seqkit seq "$f" --max-len $MAXLEN \
+    | seqkit seq --min-len $MINLEN \
+    | seqkit seq -Q $QTHRESH \
+    | gzip > "$OUTDIR/${base}.filtered.fastq.gz"
+done
+
+echo "Length and quality filtering completed."
+
+# Convert FASTQ.GZ files to FASTA
+
+#fasta_nano.sh
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s nullglob
+
+INDIR="/mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/nanopore"
+OUTDIR="$INDIR/fasta"
+
+mkdir -p "$OUTDIR"
+
+for fq in "$INDIR"/*.1.filtered.fastq.gz; do
+  sample=$(basename "$fq" .fastq.gz)
+  echo "Converting to FASTA: $sample"
+
+  vsearch --quiet \
+    --fastq_filter "$fq" \
+    --fastq_qmax 50 \
+    --fastaout "$OUTDIR/${sample}.fasta"
+done
+
+echo "FASTQ to FASTA conversion completed."
+
+#Dereplicate sequences and remove chimeras
+
+#chimeras_nano.sh
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s nullglob
+
+FASTA_DIR="/mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/nanopore/fasta"
+WORK="$FASTA_DIR/work_globalchim1"
+OUT="$FASTA_DIR/globalchim_out1"
+
+mkdir -p "$WORK" "$OUT"
+
+# Create an empty file containing all Nanopore sequences
+> "$WORK/nanopore.all.fa"
+
+# Identify all filtered FASTA files
+FILES=( "$FASTA_DIR"/*.filtered.fasta )
+
+# Stop the script if no input files are found
+if (( ${#FILES[@]} == 0 )); then
+  echo "ERROR: No *.filtered.fasta files were found in $FASTA_DIR" >&2
+  exit 1
+fi
+
+# Concatenate all filtered FASTA files
+for fa in "${FILES[@]}"; do
+  cat "$fa" >> "$WORK/nanopore.all.fa"
+done
+
+# Sort sequences by length
+vsearch --quiet \
+  --sortbylength "$WORK/nanopore.all.fa" \
+  --output "$WORK/nanopore.all.sorted.fa"
+
+# Dereplicate identical full-length sequences
+vsearch \
+  --derep_fulllength "$WORK/nanopore.all.sorted.fa" \
+  --output "$WORK/nanopore.all.derep.fa" \
+  --sizeout
+
+# Perform de novo chimera detection
+vsearch \
+  --uchime_denovo "$WORK/nanopore.all.derep.fa" \
+  --nonchimeras "$OUT/nanopore.nochim.derep.fa" \
+  --chimeras "$OUT/nanopore.chim.derep.fa" \
+  --borderline "$OUT/nanopore.border.derep.fa" \
+  --uchimeout "$OUT/nanopore.uchime.txt"
+
+# Report the number of unique sequences in each category
+echo "✓ Global non-chimeric Nanopore sequences: $(grep -c '^>' "$OUT/nanopore.nochim.derep.fa")"
+echo "✓ Global chimeric Nanopore sequences:     $(grep -c '^>' "$OUT/nanopore.chim.derep.fa")"
+echo "✓ Global borderline Nanopore sequences:   $(grep -c '^>' "$OUT/nanopore.border.derep.fa")"
+
+# Report the total abundance represented by non-chimeric sequences
+echo "Non-chimeric reads:"
+grep "^>" "$OUT/nanopore.nochim.derep.fa" | \
+sed -n 's/.*;size=\([0-9]*\).*/\1/p' | \
+awk '{sum+=$1} END{print sum+0}'
+
+# Report the total abundance represented by chimeric sequences
+echo "Chimeric reads:"
+grep "^>" "$OUT/nanopore.chim.derep.fa" | \
+sed -n 's/.*;size=\([0-9]*\).*/\1/p' | \
+awk '{sum+=$1} END{print sum+0}'
+
+#com_centroid.sh
+#Combine Nanopore and Illumina data and cluster sequences
+#!/usr/bin/env bash
+set -euo pipefail
+
+INDIR="/mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides"
+OUT="$INDIR/its97_pool"
+
+NANOPORE_FASTA="$INDIR/nanopore.nochim.derep.fa"
+ILLUMINA_FASTA="$INDIR/illumina.centroids.fa"
+COMBINED_FASTA="$OUT/all_for_clustering.fa"
+
+ID="0.97"
+
+mkdir -p "$OUT"
+
+# Check that both input files exist
+if [[ ! -f "$NANOPORE_FASTA" ]]; then
+    echo "ERROR: Nanopore FASTA file not found: $NANOPORE_FASTA" >&2
+    exit 1
+fi
+
+if [[ ! -f "$ILLUMINA_FASTA" ]]; then
+    echo "ERROR: Illumina FASTA file not found: $ILLUMINA_FASTA" >&2
+    exit 1
+fi
+
+# Combine the non-chimeric Nanopore sequences
+# with the Illumina representative sequences
+cat "$NANOPORE_FASTA" "$ILLUMINA_FASTA" > "$COMBINED_FASTA"
+
+echo "✓ Nanopore and Illumina sequences combined:"
+echo "  $COMBINED_FASTA"
+
+#com_cluster.sh
+# Cluster the combined dataset at 97% sequence identity
+vsearch --cluster_fast "$COMBINED_FASTA" \
+        --id "$ID" \
+        --strand both \
+        --centroids "$OUT/otus97.centroids.fa" \
+        --uc "$OUT/otus97.assign.uc"
+
+echo "✓ Centroids: $OUT/otus97.centroids.fa"
+echo "✓ UC file:   $OUT/otus97.assign.uc"
+
+#Assign taxonomy using SINTAX
+# Create the output directory
+mkdir -p /mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides
+
+#Run SINTAX taxonomic assignment
+vsearch --sintax "/mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/otus97.centroids.fa" \
+  --db "/mnt/d/HongosAN/EC2/Nanopore/refs/utax_reference_dataset_19.02.2025.fasta" \
+  --sintax_cutoff 0.8 \
+  --strand both \
+  --tabbedout "/mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/Asignacion/otus97.sintax.tsv"
+
+#Taxonomic assignment using LCA
+#Reference database: sh_general_release_dynamic_19.02.2025_dev.fasta
+#Decompress the reference database
+
+#Create the output directory
+mkdir -p /mnt/d/HongosAN/EC2/Nanopore/LCA
+#Run the LCA search
+vsearch --usearch_global \
+  /mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/otus97.centroids.fa \
+  --db /mnt/d/HongosAN/EC2/Nanopore/refs/sh_general_release_dynamic_19.02.2025.fasta \
+  --id 0.80 \
+  --strand both \
+  --maxaccepts 50 \
+  --maxrejects 128 \
+  --blast6out /mnt/d/HongosAN/Antartica/OBJ1/100REALNOFAKE/Secuencias_NOBORRARLASOTRAS/Centroides/its97_pool/Asignacion/otus97.lca.b6 \
+  --top_hits_only
+
+#RStudio
+#Infer the Lowest Common Ancestor (LCA)
+#Generate the LCA taxonomic assignment table#
+
+#The alignments produced with `vsearch --usearch_global` are processed in R to infer the Lowest Common Ancestor (LCA) taxonomy for each OTU. 
+This procedure consists of two main steps: 1. Generate a reference table linking each UNITE sequence identifier to its taxonomy. 2. Combine the VSEARCH 
+alignment results with the reference taxonomy and calculate the LCA assignment for each OTU.
+
+#Run the analysis in RStudio*
+
+Open RStudio and set the working directory to the folder containing the UNITE reference database.
+
+# CREATE THE REFERENCE TAXONOMY TABLE
+library(tidyverse)
+
+# Install Biostrings only if it is not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+if (!requireNamespace("Biostrings", quietly = TRUE)) {
+  BiocManager::install("Biostrings")
+}
+
+library(Biostrings)
+
+# Set the working directory
+setwd("\\\\wsl$\\Ubuntu\\home\\bellaro\\hongos\\refs")
+
+getwd()
+list.files()
+
+# Read the UNITE reference FASTA file
+fasta <- readDNAStringSet(
+  "utax_reference_dataset_19.02.2025.fasta"
+)
+
+# Extract FASTA headers
+headers <- names(fasta)
+
+# Separate the reference identifier and taxonomy
+taxmapL <- tibble(Header = headers) %>%
+  mutate(
+    Ref = sub("\\|.*", "", Header),
+    Taxonomy = sub(".*;tax=", "", Header) %>%
+      sub(";$", "", .)
+  ) %>%
+  select(Ref, Taxonomy)
+
+# Export the reference taxonomy table
+write.table(
+  taxmapL,
+  "refid_tax_map.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+
+#The resulting file, `refid_tax_map.tsv`, contains two columns:
+
+* `Ref`: reference sequence identifier.
+* `Taxonomy`: taxonomic classification associated with the reference sequence.
+
+#Calculate the LCA assignment**
+#LCA ANALYSIS AND INTEGRATION WITH REFERENCE TAXONOMY
+
+library(tidyverse)
+
+# Set the working directory
+setwd(
+  "\\\\wsl$\\Ubuntu\\home\\bellaro\\hongos\\results\\asignacion\\LCA"
+)
+
+getwd()
+list.files()
+
+# Read the VSEARCH alignment output
+b6 <- read.delim(
+  "otus090.lca.b6",
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Assign BLAST6 column names
+colnames(b6) <- c(
+  "OTU",
+  "Ref",
+  "PID",
+  "AlnLen",
+  "Mism",
+  "Gap",
+  "qStart",
+  "qEnd",
+  "sStart",
+  "sEnd",
+  "E",
+  "Bits",
+  "RefAcc"
+)
+
+# Remove abundance information from OTU identifiers
+b6$OTU <- sub(";size=.*", "", b6$OTU)
+
+# Read the reference taxonomy table
+taxmap <- read.delim(
+  "refid_tax_map.tsv",
+  stringsAsFactors = FALSE
+)
+
+# Extract the accession identifier from the reference header
+b6 <- b6 %>%
+  mutate(
+    RefAcc = sub(
+      "^[^|]+\\|([^|]+)\\|.*",
+      "\\1",
+      Ref
+    )
+  )
+
+# Function to calculate the Lowest Common Ancestor
+calc_lca <- function(tax_strings) {
+
+  tax_strings <- tax_strings[
+    !is.na(tax_strings) & tax_strings != ""
+  ]
+
+  if (length(tax_strings) == 0) {
+    return(NA_character_)
+  }
+
+  levels <- c(
+    "d:",
+    "p:",
+    "c:",
+    "o:",
+    "f:",
+    "g:",
+    "s:"
+  )
+
+  lca <- character()
+  taxonomic_parts <- strsplit(tax_strings, ",")
+
+  for (level in levels) {
+
+    candidates <- unique(
+      grep(
+        paste0("^", level),
+        trimws(unlist(taxonomic_parts)),
+        value = TRUE
+      )
+    )
+
+    # Retain the taxonomic level only when all hits agree
+    if (length(candidates) == 1) {
+      lca <- c(lca, candidates)
+    } else {
+      break
+    }
+  }
+
+  paste(lca, collapse = ",")
+}
+
+# Join alignments with the reference taxonomy,
+# filter the retained hits, and calculate the LCA
+hits <- b6 %>%
+  left_join(
+    taxmap,
+    by = c("RefAcc" = "Ref")
+  ) %>%
+  filter(
+    PID >= 80,
+    AlnLen >= 150,
+    !is.na(Taxonomy)
+  ) %>%
+  group_by(OTU) %>%
+  summarise(
+    LCA = calc_lca(Taxonomy),
+    Number_of_hits = n(),
+    .groups = "drop"
+  )
+
+# Export the final LCA taxonomic assignment table
+write.table(
+  hits,
+  "otus090.lca.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
+
+#The final file, `otus090.lca.tsv`, contains the conservative taxonomic assignment inferred for each OTU using the Lowest Common Ancestor approach. The LCA is determined 
+by comparing the taxonomic lineages of all retained reference hits. Taxonomic ranks are accepted sequentially—from domain to species—and the 
+assignment stops at the first rank where the reference hits no longer agree. For example, if all retained hits agree at the family level but 
+correspond to different genera, the OTU is assigned only up to the shared family. This LCA table is later integrated with the SINTAX and BLAST assignment 
+results to generate the final taxonomic table used in the downstream analyses.
+
+#Taxonomic assignment using BLAST
+#Reference database Bioproject PRJNA970541 
+
+#Create the BLAST database
+makeblastdb \
+    -in Fungiref.fasta \
+    -dbtype nucl \
+    -out Fungiref \
+    -parse_seqids
+
+#Create the output directory
+mkdir -p /mnt/d/HongosAN/EC2/Nanopore/BLAST
+
+
+
+
+
