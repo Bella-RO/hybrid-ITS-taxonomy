@@ -33,17 +33,6 @@ This repository includes scripts for:
 - Generation of taxonomy tables
 - Construction of the final phyloseq object
 
-## Downstream analyses
-The ecological analyses were performed in a separate repository, including:
-- Alpha diversity
-- Beta diversity
-- Functional analyses
-- Null models
-- Local and global distribution analyses
-- Comparison between taxonomic assignments obtained using **UNITE** and **GSMc**
-
-Repository:
-**https://github.com/USER/REPOSITORY** *(replace with repository link)*
 
 ## Citation
 If you use this workflow, please cite:
